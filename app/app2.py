@@ -1,573 +1,159 @@
+# app.py
+
+import streamlit as st
+import tempfile
 import os
-import re
-import uuid
-import base64
-import mimetypes
-import numpy as np
-from dotenv import load_dotenv
+from backend2 import (
+    ensure_folder_exists,
+    extract_features,
+    analyze_layout,
+    extract_job_details,
+    save_translated_word
+)
 from PIL import Image
+import mammoth
 from docx import Document
-from docx.shared import Inches
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-import fitz  # PyMuPDF
-from azure.core.credentials import AzureKeyCredential
-from azure.ai.documentintelligence import DocumentIntelligenceClient
-from azure.ai.documentintelligence.models import ContentFormat
-from tensorflow.keras.applications.vgg16 import VGG16, preprocess_input
-from tensorflow.keras.preprocessing.image import img_to_array
-from tensorflow.keras.models import Model
+import docx2pdf
+import base64
 
-# Import the translate_text function from translator.py
-from translator import translate_text
+def extract_text_from_docx(docx_path):
+    doc = Document(docx_path)
+    full_text = []
+    for para in doc.paragraphs:
+        full_text.append(para.text)
+    return '\n'.join(full_text)
 
-# Import the extract_job_details function and JobDetailsSchema from table_generate_agent.py
-from table_generate_agent import extract_job_details, JobDetailsSchema
-
-# Load environment variables
-load_dotenv()
-
-# Azure service credentials
-DOCUMENT_INT_ENDPOINT = os.getenv("AZURE_DOCUMENTINT_ENDPOINT")
-DOCUMENT_INT_KEY = os.getenv("AZURE_DOCUMENTINT_KEY")
-
-# Load the VGG16 model pretrained on ImageNet
-BASE_MODEL = VGG16(weights='imagenet')
-MODEL = Model(inputs=BASE_MODEL.input, outputs=BASE_MODEL.get_layer('fc1').output)
-
-
-def ensure_folder_exists(folder_path):
-    """Create the folder if it does not exist."""
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-        print(f"Created folder at {folder_path}")
-    else:
-        print(f"Folder already exists at {folder_path}")
-
-
-def preprocess_image(image, target_size=(224, 224)):
-    """Preprocess the image for feature extraction."""
-    image = image.resize(target_size)
-    image_array = img_to_array(image)
-    image_array = np.expand_dims(image_array, axis=0)
-    image_array = preprocess_input(image_array)
-    return image_array
-
-
-def extract_features(image):
-    """Extract features from a PIL image."""
-    image_array = preprocess_image(image)
-    features = MODEL.predict(image_array)
-    return features.flatten()
-
-
-def is_logo(image, logo_image_features, similarity_threshold=0.9):
-    """Determine if an image is a logo based on similarity to the logo image."""
-    image_features = extract_features(image)
-    similarity = np.dot(image_features, logo_image_features) / (
-        np.linalg.norm(image_features) * np.linalg.norm(logo_image_features)
-    )
-    return similarity > similarity_threshold
-
-
-def crop_image_from_pdf_page(pdf_path, page_number, bounding_box):
-    """
-    Crop a region from a given page in a PDF and return it as an image.
-
-    Args:
-        pdf_path (str): Path to the PDF file.
-        page_number (int): Page number (0-indexed).
-        bounding_box (tuple): Bounding box coordinates (x0, y0, x1, y1).
-
-    Returns:
-        PIL.Image.Image: Cropped image.
-    """
-    with fitz.open(pdf_path) as doc:
-        page = doc.load_page(page_number)
-        rect = fitz.Rect(
-            bounding_box[0] * 72,
-            bounding_box[1] * 72,
-            bounding_box[2] * 72,
-            bounding_box[3] * 72,
-        )
-        pix = page.get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), clip=rect)
-        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-    return img
-
-
-def analyze_layout(
-    input_file_path,
-    images_output_folder,
-    logo_output_folder,
-    logo_image_features,
-    similarity_threshold=0.8,
-):
-    """
-    Analyze the layout of a document and extract figures.
-
-    Args:
-        input_file_path (str): Path to the input PDF file.
-        images_output_folder (str): Folder to save non-logo images.
-        logo_output_folder (str): Folder to save logo images.
-        logo_image_features (np.ndarray): Features of the logo image.
-        similarity_threshold (float): Threshold to determine if an image is a logo.
-
-    Returns:
-        str: Markdown content extracted from the document.
-        set: Set of figure indices identified as logos.
-        list: List of non-logo image metadata with figure indices.
-    """
-    ensure_folder_exists(images_output_folder)
-    ensure_folder_exists(logo_output_folder)
-
-    document_intelligence_client = DocumentIntelligenceClient(
-        endpoint=DOCUMENT_INT_ENDPOINT,
-        credential=AzureKeyCredential(DOCUMENT_INT_KEY),
-    )
-
-    with open(input_file_path, "rb") as f:
-        poller = document_intelligence_client.begin_analyze_document(
-            "prebuilt-layout",
-            analyze_request=f,
-            content_type="application/octet-stream",
-            output_content_format=ContentFormat.MARKDOWN,
-        )
-
-    result = poller.result()
-    md_content = result.content
-
-    logo_fig_indices = set()       # To track which figures are logos
-    non_logo_images = []           # To track non-logo images with figure indices
-    non_logo_idx = 0               # Counter for non-logo images
-
-    for idx, figure in enumerate(result.figures):
-        for region in figure.bounding_regions:
-            # Extract x and y coordinates from the flat list
-            polygon = region.polygon  # This is a list of floats
-
-            xs = polygon[::2]  # x coordinates at even indices
-            ys = polygon[1::2]  # y coordinates at odd indices
-
-            # Compute bounding box coordinates
-            x0, y0 = min(xs), min(ys)
-            x1, y1 = max(xs), max(ys)
-            bounding_box = (x0, y0, x1, y1)
-
-            # Proceed with cropping and saving the image
-            cropped_image = crop_image_from_pdf_page(
-                input_file_path, region.page_number - 1, bounding_box
-            )
-
-            # Determine if the cropped image is a logo
-            if is_logo(cropped_image, logo_image_features, similarity_threshold):
-                # Save logo image
-                image_filename = f"logo_{idx}.png"
-                image_path = os.path.join(logo_output_folder, image_filename)
-                cropped_image.save(image_path)
-                logo_fig_indices.add(idx)  # Mark this figure as a logo
-                print(f"Logo {idx} cropped and saved as {image_path}")
-            else:
-                # Save non-logo image with sequential naming
-                image_filename = f"image_{non_logo_idx}.png"
-                image_path = os.path.join(images_output_folder, image_filename)
-                cropped_image.save(image_path)
-                print(f"Non-logo figure {idx} cropped and saved as {image_path}")
-                non_logo_images.append({
-                    'figure_idx': idx,
-                    'image_filename': image_filename
-                })
-                non_logo_idx += 1  # Increment non-logo image counter
-
-    return md_content, logo_fig_indices, non_logo_images
-
-
-def clean_md_content(md_content):
-    """
-    Clean up markdown content by removing unwanted lines and tags.
-
-    Args:
-        md_content (str): Original markdown content.
-
-    Returns:
-        str: Cleaned markdown content.
-    """
-    lines = md_content.splitlines()
-    cleaned_lines = []
-    for line in lines:
-        line = line.strip()
-        # Remove HTML comments
-        if re.match(r'<!--.*-->', line):
-            continue
-        # Remove empty lines
-        if not line:
-            continue
-        cleaned_lines.append(line)
-    return '\n'.join(cleaned_lines)
-
-
-def save_figures_to_word_with_position(md_content, images_output_folder, word_output_path, logo_fig_indices):
-    """
-    Save figures in the Word document in the same order as they appear in the document,
-    excluding logo images.
-
-    Args:
-        md_content (str): Markdown content extracted from the document.
-        images_output_folder (str): Folder containing the images.
-        word_output_path (str): Path to save the Word document.
-        logo_fig_indices (set): Set of figure indices identified as logos.
-    """
-    # Clean up the markdown content
-    md_content = clean_md_content(md_content)
-
-    # Create a new Word document
-    doc = Document()
-
-    # Split markdown content into lines
-    lines = md_content.splitlines()
-
-    figure_counter = 0       # To keep track of figure indices in markdown
-    non_logo_insert_counter = 0  # To track images in images_output_folder
-    in_figure = False        # Flag to indicate if we're inside a figure block
-
-    for line in lines:
-        line = line.strip()
-
-        # Handle figure start tag
-        if line.lower() == '<figure>':
-            in_figure = True
-            figure_counter += 1  # Increment figure_counter as we're entering a new figure
-            continue
-
-        # Handle figure end tag
-        elif line.lower() == '</figure>':
-            in_figure = False
-
-            # Check if the current figure is a logo
-            current_fig_idx = figure_counter - 1  # Zero-based index
-            if current_fig_idx in logo_fig_indices:
-                print(f"Skipping logo figure {current_fig_idx} from the document.")
-                continue  # Skip inserting this image
-
-            # Insert the figure image
-            image_filename = f"image_{non_logo_insert_counter}.png"
-            image_path = os.path.join(images_output_folder, image_filename)
-
-            if os.path.exists(image_path):
-                # Add image to Word document
-                doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
-                last_paragraph = doc.paragraphs[-1]
-                last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                print(f"Inserted image {image_filename} into the document.")
-                non_logo_insert_counter += 1  # Increment after inserting a non-logo image
-            else:
-                print(f"Image not found: {image_path}")
-
-            continue
-
-        # Handle content inside figure (if any)
-        if in_figure:
-            continue  # Skip content inside figure tags if not needed
-
-        # Handle headings
-        if line.startswith('#'):
-            heading_level = len(line) - len(line.lstrip('#'))
-            heading_text = line.lstrip('#').strip()
-            if heading_level <= 6:
-                doc.add_heading(heading_text, level=heading_level)
-            else:
-                doc.add_paragraph(heading_text)
-        else:
-            # Add the line as a paragraph
-            doc.add_paragraph(line)
-
-    # Save the Word document
+def convert_docx_to_pdf(docx_path, pdf_path):
     try:
-        doc.save(word_output_path)
-        print(f"Word document saved at {word_output_path}")
+        docx2pdf.convert(docx_path, pdf_path)
+        return True
     except Exception as e:
-        print(f"Error saving Word document: {e}")
+        print(f"Error converting docx to pdf: {e}")
+        return False
 
-
-def save_translated_word(
-    md_content,
-    images_output_folder,
-    word_output_path,
-    logo_output_folder,
-    logo_fig_indices,
-    non_logo_images,
-    job_details: JobDetailsSchema
-):
-    """
-    Save a translated version of the document to a Word file, including a job details table.
-    The splitting for translation is based on each </figure> tag.
-
-    Args:
-        md_content (str): Original markdown content.
-        images_output_folder (str): Folder containing non-logo images.
-        word_output_path (str): Path to save the translated Word document.
-        logo_output_folder (str): Folder containing logo images.
-        logo_fig_indices (set): Set of figure indices identified as logos.
-        non_logo_images (list): List of non-logo image metadata with figure indices.
-        job_details (JobDetailsSchema): Extracted job details to include in the table.
-    """
-    # Clean up the markdown content
-    md_content = clean_md_content(md_content)
-
-    # Split markdown content into lines
-    lines = md_content.splitlines()
-
-    # Initialize variables
-    translated_doc = Document()
-    figure_counter = 0       # To keep track of figure indices in markdown
-    in_figure = False        # Flag to indicate if we're inside a figure block
-    text_buffer = []         # Buffer to collect text lines
-
-    # Insert the job details table at the beginning
-    if job_details:
-        table = translated_doc.add_table(rows=0, cols=2)
-        table.style = 'Light List Accent 1'  # Choose a style as needed
-
-        # Helper function to add a row to the table
-        def add_table_row(table, key, value):
-            row = table.add_row().cells
-            row[0].text = key.replace('_', ' ').capitalize()
-            row[1].text = value if value is not None else "N/A"
-
-        # Add rows for each field in JobDetailsSchema
-        add_table_row(table, 'role_position', job_details.role_position)
-        add_table_row(table, 'location', job_details.location)
-        add_table_row(table, 'number_of_fte', job_details.number_of_fte)
-        add_table_row(table, 'rgs_id', job_details.rgs_id)
-        add_table_row(table, 'remote_onsite', job_details.remote_onsite)
-        add_table_row(table, 'onsite_frequency_week', job_details.onsite_frequency_week)
-        add_table_row(table, 'project_duration', job_details.project_duration)
-        add_table_row(table, 'working_hours_per_day', job_details.working_hours_per_day)
-        add_table_row(table, 'contract_mode', job_details.contract_mode)
-        add_table_row(table, 'daily_rate', job_details.daily_rate)
-        add_table_row(table, 'language_proficiency', job_details.language_proficiency)
-        add_table_row(table, 'start_date_of_engagement', job_details.start_date_of_engagement)
-        add_table_row(table, 'experience_required', job_details.experience_required)
-
-        # If JobDetailsSchema has nested JobDescriptionSchema, handle it
-        if job_details.job_description:
-            job_desc = job_details.job_description
-            add_table_row(table, 'must', ', '.join(job_desc.must) if job_desc.must else "N/A")
-            add_table_row(table, 'target', ', '.join(job_desc.target) if job_desc.target else "N/A")
-
-        # Add a paragraph after the table for spacing
-        translated_doc.add_paragraph("\n")
-
-    # Create a mapping of figure indices to image filenames for non-logo images
-    non_logo_figures = {img['figure_idx']: img['image_filename'] for img in non_logo_images}
-
-    for line in lines:
-        line = line.strip()
-
-        # Handle figure start tag
-        if line.lower() == '<figure>':
-            in_figure = True
-            figure_counter += 1  # Increment figure_counter as we're entering a new figure
-            continue
-
-        # Handle figure end tag
-        elif line.lower() == '</figure>':
-            in_figure = False
-
-            # Check if the current figure is a logo
-            current_fig_idx = figure_counter - 1  # Zero-based index
-            if current_fig_idx in logo_fig_indices:
-                print(f"Skipping logo figure {current_fig_idx} from the translated document.")
-
-                # Translate and insert the accumulated text before the logo
-                if text_buffer:
-                    text_to_translate = '\n'.join(text_buffer)
-                    print(f"Translating text chunk before logo figure {current_fig_idx}...")
-                    print("Text before translation:")
-                    print(text_to_translate)  # Debug: Print text before translation
-
-                    try:
-                        translations = translate_text(text_to_translate)
-                        print("Translation result:")
-                        print(translations)  # Debug: Print translation result
-
-                        if translations and len(translations) > 0:
-                            translated_header = translations[0].header or ""
-                            translated_content = translations[0].content or ""
-                            # Insert translated header if exists
-                            if translated_header:
-                                translated_doc.add_heading(translated_header, level=1)
-                            # Insert translated content
-                            if translated_content:
-                                translated_doc.add_paragraph(translated_content)
-                        else:
-                            print("No translations returned for the text chunk.")
-                    except Exception as e:
-                        print(f"Error during translation: {e}")
-
-                    text_buffer = []  # Clear the buffer
-                continue  # Skip inserting the logo image
-
-            # Check if the current figure is a non-logo image
-            if current_fig_idx in non_logo_figures:
-                image_filename = non_logo_figures[current_fig_idx]
-                image_path = os.path.join(images_output_folder, image_filename)
-
-                # Translate and insert the accumulated text before the image
-                if text_buffer:
-                    text_to_translate = '\n'.join(text_buffer)
-                    print(f"Translating text chunk before image {image_filename}...")
-                    print("Text before translation:")
-                    print(text_to_translate)  # Debug: Print text before translation
-
-                    try:
-                        translations = translate_text(text_to_translate)
-                        print("Translation result:")
-                        print(translations)  # Debug: Print translation result
-
-                        if translations and len(translations) > 0:
-                            translated_header = translations[0].header or ""
-                            translated_content = translations[0].content or ""
-                            # Insert translated header if exists
-                            if translated_header:
-                                translated_doc.add_heading(translated_header, level=1)
-                            # Insert translated content
-                            if translated_content:
-                                translated_doc.add_paragraph(translated_content)
-                        else:
-                            print("No translations returned for the text chunk.")
-                    except Exception as e:
-                        print(f"Error during translation: {e}")
-
-                    text_buffer = []  # Clear the buffer
-
-                # Insert the non-logo image into the translated document
-                if os.path.exists(image_path):
-                    try:
-                        translated_doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
-                        last_paragraph = translated_doc.paragraphs[-1]
-                        last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        print(f"Inserted image {image_filename} into the translated document.")
-                    except Exception as e:
-                        print(f"Error inserting image {image_filename}: {e}")
-                else:
-                    print(f"Image not found: {image_path}")
-
-                # Optionally, add a page break after the image to maintain separation
-                try:
-                    translated_doc.add_page_break()
-                except Exception as e:
-                    print(f"Error adding page break: {e}")
-
-            continue
-
-        # Handle content inside figure (if any)
-        if in_figure:
-            continue  # Skip content inside figure tags if not needed
-
-        # Collect text lines
-        text_buffer.append(line)
-
-    # After processing all lines, check if there's remaining text to translate
-    if text_buffer:
-        text_to_translate = '\n'.join(text_buffer)
-        print("Translating final text chunk...")
-        print("Text before translation:")
-        print(text_to_translate)  # Debug: Print text before translation
-
-        try:
-            translations = translate_text(text_to_translate)
-            print("Translation result:")
-            print(translations)  # Debug: Print translation result
-
-            if translations and len(translations) > 0:
-                translated_header = translations[0].header or ""
-                translated_content = translations[0].content or ""
-                # Insert translated header if exists
-                if translated_header:
-                    translated_doc.add_heading(translated_header, level=1)
-                # Insert translated content
-                if translated_content:
-                    translated_doc.add_paragraph(translated_content)
-            else:
-                print("No translations returned for the final text chunk.")
-        except Exception as e:
-            print(f"Error during translation: {e}")
-
-    # Save the translated Word document
-    try:
-        translated_doc.save(word_output_path)
-        print(f"Translated Word document saved at {word_output_path}")
-    except Exception as e:
-        print(f"Error saving translated Word document: {e}")
-
+def display_pdf(pdf_path):
+    with open(pdf_path, "rb") as f:
+        pdf_bytes = f.read()
+        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="700" height="800" type="application/pdf"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
 
 def main():
-    """Main function to execute the script."""
-    # Input and output paths
-    input_file = '/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/input_file/20240926_Quality-Test Engineer_Testing-Standard_Junior.pdf'
-    word_output_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/output_file/output2.docx"  # Original output Word document path
-    translated_word_output_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/output_file/output_translated2.docx"  # Translated Word document path
-    output_folder = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/image_crooped"
-    logo_output_folder = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/image_crooped/cropped_logo"
-    images_output_folder = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/image_crooped/cropped_notlogo"
-    logo_image_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/logo/logo.png"  # Path to the logo image to exclude
-
-    # Ensure folders exist
-    ensure_folder_exists(output_folder)
-    ensure_folder_exists(images_output_folder)
-    ensure_folder_exists(logo_output_folder)
-
-    # Extract features of the logo image
-    try:
-        with Image.open(logo_image_path) as logo_img:
-            logo_image_features = extract_features(logo_img)
-        print(f"Extracted features from logo image: {logo_image_path}")
-    except Exception as e:
-        print(f"Error processing logo image: {e}")
-        return  # Exit if logo image processing fails
-
-    # Analyze the PDF and save results
-    try:
-        md_content, logo_fig_indices, non_logo_images = analyze_layout(
-            input_file,
-            images_output_folder,
-            logo_output_folder,
-            logo_image_features,
-        )
-        print("Completed layout analysis of the PDF.")
-    except Exception as e:
-        print(f"Error during layout analysis: {e}")
-        return  # Exit if layout analysis fails
-
-    # Extract job details from the extracted text
-    try:
-        table_filled = extract_job_details(md_content)  # Assuming extract_job_details returns JobDetailsSchema
-        print("Extracted job details from the text.")
-    except Exception as e:
-        print(f"Error extracting job details: {e}")
-        table_filled = None  # Proceed without job details
-
-    # Save figures to original Word document, excluding logos
-    try:
-        save_figures_to_word_with_position(md_content, images_output_folder, word_output_path, logo_fig_indices)
-        print("Saved figures to the original Word document.")
-    except Exception as e:
-        print(f"Error saving figures to Word document: {e}")
-
-    # Save figures and translated text to translated Word document, including job details table
-    try:
-        save_translated_word(
-            md_content,
-            images_output_folder,
-            translated_word_output_path,
-            logo_output_folder,
-            logo_fig_indices,
-            non_logo_images,  # Pass the list of non-logo images
-            table_filled  # Pass the extracted job details
-        )
-        print("Saved translated content to the translated Word document.")
-    except Exception as e:
-        print(f"Error saving translated Word document: {e}")
-
+    st.set_page_config(page_title="PDF Translator", layout="wide")
+    st.title("PDF Translator and Word Document Generator")
+    st.write("Upload a PDF file to translate its content and download the translated Word document.")
+    
+    # File uploader
+    uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+    
+    if uploaded_file is not None:
+        # Save the uploaded PDF to a temporary file
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+            tmp_file.write(uploaded_file.read())
+            tmp_pdf_path = tmp_file.name
+    
+        # Display the uploaded PDF (optional)
+        try:
+            image = Image.open(uploaded_file)
+            st.image(image, caption='Uploaded PDF', use_column_width=True)
+        except:
+            st.write("Uploaded file is a PDF.")
+    
+        # Processing button
+        if st.button("Process and Translate"):
+            with st.spinner("Processing the PDF..."):
+                try:
+                    # Define temporary output paths
+                    with tempfile.TemporaryDirectory() as tmp_dir:
+                        images_output_folder = os.path.join(tmp_dir, "cropped_notlogo")
+                        logo_output_folder = os.path.join(tmp_dir, "cropped_logo")
+                        ensure_folder_exists(images_output_folder)
+                        ensure_folder_exists(logo_output_folder)
+    
+                        # Path to the logo image (ensure this path is correct)
+                        logo_image_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/logo/logo.png"  # Update this path as needed
+    
+                        if not os.path.exists(logo_image_path):
+                            st.error(f"Logo image not found at {logo_image_path}. Please check the path.")
+                            return
+    
+                        # Extract features of the logo image
+                        with Image.open(logo_image_path) as logo_img:
+                            logo_image_features = extract_features(logo_img)
+    
+                        # Analyze the PDF and save results
+                        md_content, logo_fig_indices = analyze_layout(
+                            tmp_pdf_path,
+                            images_output_folder,
+                            logo_output_folder,
+                            logo_image_features,
+                        )
+    
+                        # Extract job details from the extracted text
+                        table_filled = extract_job_details(md_content)  # Assuming extract_job_details returns JobDetailsSchema
+    
+                        # Define paths for the output Word documents
+                        translated_word_output_path = os.path.join(tmp_dir, "translated_output.docx")
+    
+                        # Save translated Word document, including job details table
+                        save_translated_word(
+                            md_content,
+                            images_output_folder,
+                            translated_word_output_path,
+                            logo_output_folder,
+                            logo_fig_indices,
+                            table_filled  # Pass the extracted job details
+                        )
+    
+                        # Read the translated Word document
+                        with open(translated_word_output_path, "rb") as f:
+                            translated_doc_bytes = f.read()
+    
+                        # Convert docx to HTML for preview
+                        with open(translated_word_output_path, "rb") as docx_file:
+                            result = mammoth.convert_to_html(docx_file)
+                            html_content = result.value  # The generated HTML
+                            messages = result.messages  # Any messages, such as warnings during conversion
+                        
+                        # Debugging: Check if HTML contains text
+                        if len(html_content.strip()) == 0:
+                            st.warning("Converted HTML is empty. Displaying extracted text instead.")
+                            # Extract and display text
+                            text_content = extract_text_from_docx(translated_word_output_path)
+                            st.subheader("Document Preview (Text)")
+                            st.text_area("Translated Document Content", value=text_content, height=800)
+                        else:
+                            # Display the HTML content
+                            st.subheader("Document Preview (HTML)")
+                            st.components.v1.html(
+                                html_content,
+                                height=800,  # Adjust height as needed
+                                scrolling=True
+                            )
+    
+                        # Optional: Convert to PDF and display
+                        if st.checkbox("Convert to PDF for Enhanced Preview"):
+                            pdf_output_path = os.path.join(tmp_dir, "translated_output.pdf")
+                            if convert_docx_to_pdf(translated_word_output_path, pdf_output_path):
+                                st.subheader("Document Preview (PDF)")
+                                display_pdf(pdf_output_path)
+                            else:
+                                st.error("Failed to convert Word document to PDF.")
+    
+                        # Provide download button for the Word document
+                        st.success("Translation and document generation completed!")
+                        st.download_button(
+                            label="Download Translated Word Document",
+                            data=translated_doc_bytes,
+                            file_name="translated_output.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                        )
+    
+                except Exception as e:
+                    st.error(f"An error occurred during processing: {e}")
+    
+        # Cleanup the temporary PDF file
+        os.unlink(tmp_pdf_path)
 
 if __name__ == "__main__":
     main()

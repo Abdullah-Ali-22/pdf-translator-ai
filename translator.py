@@ -46,7 +46,7 @@ class TranslationsSchema(BaseModel):
 translate_template = """
 You are a highly skilled translator. Please translate the following text from German to english, ensuring that the translation is accurate, full and maintains the original meaning and tone:
 
-example_input:
+
 
 
 

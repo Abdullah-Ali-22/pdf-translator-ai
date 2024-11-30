@@ -3,7 +3,7 @@
 import streamlit as st
 import tempfile
 import os
-from db_Intern_project.app.backend import (
+from backend import (
     ensure_folder_exists,
     extract_features,
     analyze_layout,
@@ -45,7 +45,7 @@ def main():
                         ensure_folder_exists(logo_output_folder)
 
                         # Path to the logo image (ensure this path is correct)
-                        logo_image_path = "Data/logo/logo.png"  # Update this path as needed
+                        logo_image_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/logo/logo.png"  # Update this path as needed
 
                         if not os.path.exists(logo_image_path):
                             st.error(f"Logo image not found at {logo_image_path}. Please check the path.")

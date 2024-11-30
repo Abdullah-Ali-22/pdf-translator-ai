@@ -2,7 +2,9 @@
 
 import os
 import re
-from typing import Tuple, Set
+import uuid
+import base64
+import mimetypes
 import numpy as np
 from dotenv import load_dotenv
 from PIL import Image
@@ -34,8 +36,7 @@ DOCUMENT_INT_KEY = os.getenv("AZURE_DOCUMENTINT_KEY")
 BASE_MODEL = VGG16(weights='imagenet')
 MODEL = Model(inputs=BASE_MODEL.input, outputs=BASE_MODEL.get_layer('fc1').output)
 
-
-def ensure_folder_exists(folder_path: str):
+def ensure_folder_exists(folder_path):
     """Create the folder if it does not exist."""
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
@@ -43,8 +44,7 @@ def ensure_folder_exists(folder_path: str):
     else:
         print(f"Folder already exists at {folder_path}")
 
-
-def preprocess_image(image: Image.Image, target_size: Tuple[int, int] = (224, 224)) -> np.ndarray:
+def preprocess_image(image, target_size=(224, 224)):
     """Preprocess the image for feature extraction."""
     image = image.resize(target_size)
     image_array = img_to_array(image)
@@ -52,15 +52,13 @@ def preprocess_image(image: Image.Image, target_size: Tuple[int, int] = (224, 22
     image_array = preprocess_input(image_array)
     return image_array
 
-
-def extract_features(image: Image.Image) -> np.ndarray:
+def extract_features(image):
     """Extract features from a PIL image."""
     image_array = preprocess_image(image)
     features = MODEL.predict(image_array)
     return features.flatten()
 
-
-def is_logo(image: Image.Image, logo_image_features: np.ndarray, similarity_threshold: float = 0.9) -> bool:
+def is_logo(image, logo_image_features, similarity_threshold=0.9):
     """Determine if an image is a logo based on similarity to the logo image."""
     image_features = extract_features(image)
     similarity = np.dot(image_features, logo_image_features) / (
@@ -68,8 +66,7 @@ def is_logo(image: Image.Image, logo_image_features: np.ndarray, similarity_thre
     )
     return similarity > similarity_threshold
 
-
-def crop_image_from_pdf_page(pdf_path: str, page_number: int, bounding_box: Tuple[float, float, float, float]) -> Image.Image:
+def crop_image_from_pdf_page(pdf_path, page_number, bounding_box):
     """
     Crop a region from a given page in a PDF and return it as an image.
 
@@ -93,14 +90,13 @@ def crop_image_from_pdf_page(pdf_path: str, page_number: int, bounding_box: Tupl
         img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
     return img
 
-
 def analyze_layout(
-    input_file_path: str,
-    images_output_folder: str,
-    logo_output_folder: str,
-    logo_image_features: np.ndarray,
-    similarity_threshold: float = 0.8,
-) -> Tuple[str, Set[int]]:
+    input_file_path,
+    images_output_folder,
+    logo_output_folder,
+    logo_image_features,
+    similarity_threshold=0.8,
+):
     """
     Analyze the layout of a document and extract figures.
 
@@ -112,7 +108,8 @@ def analyze_layout(
         similarity_threshold (float): Threshold to determine if an image is a logo.
 
     Returns:
-        Tuple[str, Set[int]]: Markdown content extracted from the document and set of logo figure indices.
+        str: Markdown content extracted from the document.
+        set: Set of figure indices identified as logos.
     """
     ensure_folder_exists(images_output_folder)
     ensure_folder_exists(logo_output_folder)
@@ -133,8 +130,8 @@ def analyze_layout(
     result = poller.result()
     md_content = result.content
 
-    logo_fig_indices = set()  # To track which figures are logos
-    non_logo_idx = 0  # Counter for non-logo images
+    logo_fig_indices = set()       # To track which figures are logos
+    non_logo_idx = 0               # Counter for non-logo images
 
     for idx, figure in enumerate(result.figures):
         for region in figure.bounding_regions:
@@ -172,8 +169,7 @@ def analyze_layout(
 
     return md_content, logo_fig_indices
 
-
-def clean_md_content(md_content: str) -> str:
+def clean_md_content(md_content):
     """
     Clean up markdown content by removing unwanted lines and tags.
 
@@ -196,24 +192,248 @@ def clean_md_content(md_content: str) -> str:
         cleaned_lines.append(line)
     return '\n'.join(cleaned_lines)
 
-
-def save_translated_word(
-    job_details: JobDetailsSchema,
-    translated_content: str,
-    word_output_path: str,
-    images_output_folder: str
-) -> None:
+def save_figures_to_word_with_position(md_content, images_output_folder, word_output_path, logo_fig_indices):
     """
-    Save the translated content along with job details and images to a Word document.
+    Save figures in the Word document in the same order as they appear in the document,
+    excluding logo images.
 
     Args:
-        job_details (JobDetailsSchema): Extracted job details to include in the table.
-        translated_content (str): User-edited translated content.
-        word_output_path (str): Path to save the translated Word document.
-        images_output_folder (str): Folder containing non-logo images.
+        md_content (str): Markdown content extracted from the document.
+        images_output_folder (str): Folder containing the images.
+        word_output_path (str): Path to save the Word document.
+        logo_fig_indices (set): Set of figure indices identified as logos.
     """
+    # Clean up the markdown content
+    md_content = clean_md_content(md_content)
+
     # Create a new Word document
+    doc = Document()
+
+    # Split markdown content into lines
+    lines = md_content.splitlines()
+
+    figure_counter = 0       # To keep track of figure indices in markdown
+    non_logo_insert_counter = 0  # To track images in images_output_folder
+    in_figure = False        # Flag to indicate if we're inside a figure block
+
+    for line in lines:
+        line = line.strip()
+
+        # Handle figure start tag
+        if line.lower() == '<figure>':
+            in_figure = True
+            figure_counter += 1  # Increment figure_counter as we're entering a new figure
+            continue
+
+        # Handle figure end tag
+        elif line.lower() == '</figure>':
+            in_figure = False
+
+            # Check if the current figure is a logo
+            current_fig_idx = figure_counter - 1  # Zero-based index
+            if current_fig_idx in logo_fig_indices:
+                print(f"Skipping logo figure {current_fig_idx} from the document.")
+                continue  # Skip inserting this image
+
+            # Insert the figure image
+            image_filename = f"{non_logo_insert_counter}.png"
+            image_path = os.path.join(images_output_folder, image_filename)
+
+            if os.path.exists(image_path):
+                # Add image to Word document
+                doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
+                last_paragraph = doc.paragraphs[-1]
+                last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                print(f"Inserted image {image_filename} into the document.")
+                non_logo_insert_counter += 1  # Increment after inserting a non-logo image
+            else:
+                print(f"Image not found: {image_path}")
+
+            continue
+
+        # Handle content inside figure (if any)
+        if in_figure:
+            continue  # Skip content inside figure tags if not needed
+
+        # Handle headings
+        if line.startswith('#'):
+            heading_level = len(line) - len(line.lstrip('#'))
+            heading_text = line.lstrip('#').strip()
+            if heading_level <= 6:
+                doc.add_heading(heading_text, level=heading_level)
+            else:
+                doc.add_paragraph(heading_text)
+        else:
+            # Add the line as a paragraph
+            doc.add_paragraph(line)
+
+    # Save the Word document
+    doc.save(word_output_path)
+    print(f"Word document saved at {word_output_path}")
+
+# def save_translated_word(md_content, images_output_folder, word_output_path, logo_output_folder, logo_fig_indices, job_details: JobDetailsSchema):
+#     """
+#     Save a translated version of the document to a Word file, including a job details table.
+
+#     Args:
+#         md_content (str): Original markdown content.
+#         images_output_folder (str): Folder containing non-logo images.
+#         word_output_path (str): Path to save the translated Word document.
+#         logo_output_folder (str): Folder containing logo images.
+#         logo_fig_indices (set): Set of figure indices identified as logos.
+#         job_details (JobDetailsSchema): Extracted job details to include in the table.
+#     """
+#     # Clean up the markdown content
+#     md_content = clean_md_content(md_content)
+
+#     # Split the markdown content into lines
+#     lines = md_content.splitlines()
+
+#     # Initialize variables
+#     translated_doc = Document()
+#     figure_counter = 0       # To keep track of figure indices in markdown
+#     non_logo_insert_counter = 0  # To track images in images_output_folder
+#     in_figure = False        # Flag to indicate if we're inside a figure block
+#     text_buffer = []         # Buffer to collect text lines
+
+#     # Insert the job details table at the beginning
+#     if job_details:
+#         table = translated_doc.add_table(rows=0, cols=2)
+#         table.style = 'Light List Accent 1'  # Choose a style as needed
+
+#         # Helper function to add a row to the table
+#         def add_table_row(table, key, value):
+#             row = table.add_row().cells
+#             row[0].text = key.replace('_', ' ').capitalize()
+#             row[1].text = value if value is not None else "N/A"
+
+#         # Add rows for each field in JobDetailsSchema
+#         add_table_row(table, 'role_position', job_details.role_position)
+#         add_table_row(table, 'location', job_details.location)
+#         add_table_row(table, 'number_of_fte', job_details.number_of_fte)
+#         add_table_row(table, 'rgs_id', job_details.rgs_id)
+#         add_table_row(table, 'remote_onsite', job_details.remote_onsite)
+#         add_table_row(table, 'onsite_frequency_week', job_details.onsite_frequency_week)
+#         add_table_row(table, 'project_duration', job_details.project_duration)
+#         add_table_row(table, 'working_hours_per_day', job_details.working_hours_per_day)
+#         add_table_row(table, 'contract_mode', job_details.contract_mode)
+#         add_table_row(table, 'daily_rate', job_details.daily_rate)
+#         add_table_row(table, 'language_proficiency', job_details.language_proficiency)
+#         add_table_row(table, 'start_date_of_engagement', job_details.start_date_of_engagement)
+#         add_table_row(table, 'experience_required', job_details.experience_required)
+
+#         # If JobDetailsSchema has nested JobDescriptionSchema, handle it
+#         if job_details.job_description:
+#             job_desc = job_details.job_description
+#             add_table_row(table, 'must', ', '.join(job_desc.must) if job_desc.must else "N/A")
+#             add_table_row(table, 'target', ', '.join(job_desc.target) if job_desc.target else "N/A")
+
+#         # Add a paragraph after the table for spacing
+#         translated_doc.add_paragraph("\n")
+
+#     for line in lines:
+#         line = line.strip()
+
+#         # Handle figure start tag
+#         if line.lower() == '<figure>':
+#             in_figure = True
+#             figure_counter += 1  # Increment figure_counter as we're entering a new figure
+
+#             # If there's accumulated text, translate and insert it
+#             if text_buffer:
+#                 text_to_translate = '\n'.join(text_buffer)
+#                 translations = translate_text(text_to_translate)
+#                 # Assuming the translation returns a list of translations
+#                 # Here, we take the first translation (adjust if multiple translations are returned)
+#                 if translations and len(translations) > 0:
+#                     translated_header = translations[0].header or ""
+#                     translated_content = translations[0].content or ""
+#                     # Insert translated header if exists
+#                     if translated_header:
+#                         translated_doc.add_heading(translated_header, level=1)
+#                     # Insert translated content
+#                     if translated_content:
+#                         translated_doc.add_paragraph(translated_content)
+#                 text_buffer = []  # Clear the buffer
+
+#             continue
+
+#         # Handle figure end tag
+#         elif line.lower() == '</figure>':
+#             in_figure = False
+
+#             # Check if the current figure is a logo
+#             current_fig_idx = figure_counter - 1  # Zero-based index
+#             if current_fig_idx in logo_fig_indices:
+#                 print(f"Skipping logo figure {current_fig_idx} from the translated document.")
+#                 continue  # Skip inserting this image
+
+#             # Insert the figure image
+#             image_filename = f"{non_logo_insert_counter}.png"
+#             image_path = os.path.join(images_output_folder, image_filename)
+
+#             if os.path.exists(image_path):
+#                 # Add image to translated Word document
+#                 translated_doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
+#                 last_paragraph = translated_doc.paragraphs[-1]
+#                 last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+#                 print(f"Inserted image {image_filename} into the translated document.")
+#                 non_logo_insert_counter += 1  # Increment after inserting a non-logo image
+#             else:
+#                 print(f"Image not found: {image_path}")
+
+#             continue
+
+#         # Handle content inside figure (if any)
+#         if in_figure:
+#             continue  # Skip content inside figure tags if not needed
+
+#         # Collect text lines
+#         text_buffer.append(line)
+
+#     # After processing all lines, check if there's remaining text to translate
+#     if text_buffer:
+#         text_to_translate = '\n'.join(text_buffer)
+#         translations = translate_text(text_to_translate)
+#         if translations and len(translations) > 0:
+#             translated_header = translations[0].header or ""
+#             translated_content = translations[0].content or ""
+#             # Insert translated header if exists
+#             if translated_header:
+#                 translated_doc.add_heading(translated_header, level=1)
+#             # Insert translated content
+#             if translated_content:
+#                 translated_doc.add_paragraph(translated_content)
+
+#     # Save the translated Word document
+#     translated_doc.save(word_output_path)
+#     print(f"Translated Word document saved at {word_output_path}")
+
+def save_translated_word(md_content, images_output_folder, word_output_path, logo_output_folder, logo_fig_indices, job_details: JobDetailsSchema):
+    """
+    Save a translated version of the document to a Word file, including a job details table.
+
+    Args:
+        md_content (str): Original markdown content.
+        images_output_folder (str): Folder containing non-logo images.
+        word_output_path (str): Path to save the translated Word document.
+        logo_output_folder (str): Folder containing logo images.
+        logo_fig_indices (set): Set of figure indices identified as logos.
+        job_details (JobDetailsSchema): Extracted job details to include in the table.
+    """
+    # Clean up the markdown content
+    md_content = clean_md_content(md_content)
+    print(f"md_content cleaned: {md_content}")
+
+    # Split the markdown content into lines
+    lines = md_content.splitlines()
+
+    # Initialize variables
     translated_doc = Document()
+    figure_counter = 0       # To keep track of figure indices in markdown
+    non_logo_insert_counter = 0  # To track images in images_output_folder
+    in_figure = False        # Flag to indicate if we're inside a figure block
+    text_buffer = []         # Buffer to collect text lines
 
     # Insert the job details table at the beginning
     if job_details:
@@ -227,50 +447,119 @@ def save_translated_word(
             row[1].text = value if value is not None else "N/A"
 
         # Add rows for each field in JobDetailsSchema
-        for field, value in job_details.dict().items():
-            if field == 'job_description' and value:
-                for sub_field, sub_value in value.dict().items():
-                    formatted_key = sub_field.replace('_', ' ').capitalize()
-                    formatted_value = ', '.join(sub_value) if isinstance(sub_value, list) else sub_value
-                    add_table_row(table, formatted_key, formatted_value)
-            else:
-                formatted_key = field.replace('_', ' ').capitalize()
-                add_table_row(table, formatted_key, value if value is not None else "N/A")
+        add_table_row(table, 'role_position', job_details.role_position)
+        add_table_row(table, 'location', job_details.location)
+        add_table_row(table, 'number_of_fte', job_details.number_of_fte)
+        add_table_row(table, 'rgs_id', job_details.rgs_id)
+        add_table_row(table, 'remote_onsite', job_details.remote_onsite)
+        add_table_row(table, 'onsite_frequency_week', job_details.onsite_frequency_week)
+        add_table_row(table, 'project_duration', job_details.project_duration)
+        add_table_row(table, 'working_hours_per_day', job_details.working_hours_per_day)
+        add_table_row(table, 'contract_mode', job_details.contract_mode)
+        add_table_row(table, 'daily_rate', job_details.daily_rate)
+        add_table_row(table, 'language_proficiency', job_details.language_proficiency)
+        add_table_row(table, 'start_date_of_engagement', job_details.start_date_of_engagement)
+        add_table_row(table, 'experience_required', job_details.experience_required)
+
+        # If JobDetailsSchema has nested JobDescriptionSchema, handle it
+        if job_details.job_description:
+            job_desc = job_details.job_description
+            add_table_row(table, 'must', ', '.join(job_desc.must) if job_desc.must else "N/A")
+            add_table_row(table, 'target', ', '.join(job_desc.target) if job_desc.target else "N/A")
 
         # Add a paragraph after the table for spacing
         translated_doc.add_paragraph("\n")
 
-    # Add the user-edited translated content
-    if translated_content:
-        # Split the content into paragraphs based on double newlines
-        paragraphs = translated_content.split('\n\n')
-        for para in paragraphs:
-            if para.startswith('#'):
-                # Handle headings
-                heading_level = len(para) - len(para.lstrip('#'))
-                heading_text = para.lstrip('#').strip()
-                if heading_level <= 6:
-                    translated_doc.add_heading(heading_text, level=heading_level)
+    for line in lines:
+        line = line.strip()
+
+        # Handle figure start tag
+        if line.lower() == '<figure>':
+            in_figure = True
+            figure_counter += 1  # Increment figure_counter as we're entering a new figure
+
+            # If there's accumulated text, translate and insert it
+            if text_buffer:
+                text_to_translate = '\n'.join(text_buffer)
+                print(f"original text: {text_to_translate}")
+                translations = translate_text(text_to_translate)
+                print(f"translations: {translations}")
+                
+                # Check if translations are wrapped in TranslationsSchema
+                if hasattr(translations, 'translations'):
+                    translation_list = translations.translations
                 else:
-                    translated_doc.add_paragraph(heading_text)
+                    translation_list = translations  # Assuming it's a list
+
+                for translation in translation_list:
+                    translated_header = translation.header or ""
+                    translated_content = translation.content or ""
+                    # Insert translated header if exists
+                    if translated_header:
+                        translated_doc.add_heading(translated_header, level=1)
+                    # Insert translated content
+                    if translated_content:
+                        translated_doc.add_paragraph(translated_content)
+                
+                text_buffer = []  # Clear the buffer
+
+            continue
+
+        # Handle figure end tag
+        elif line.lower() == '</figure>':
+            in_figure = False
+
+            # Check if the current figure is a logo
+            current_fig_idx = figure_counter - 1  # Zero-based index
+            if current_fig_idx in logo_fig_indices:
+                print(f"Skipping logo figure {current_fig_idx} from the translated document.")
+                continue  # Skip inserting this image
+
+            # Insert the figure image
+            image_filename = f"{non_logo_insert_counter}.png"
+            image_path = os.path.join(images_output_folder, image_filename)
+
+            if os.path.exists(image_path):
+                # Add image to translated Word document
+                translated_doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
+                last_paragraph = translated_doc.paragraphs[-1]
+                last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                print(f"Inserted image {image_filename} into the translated document.")
+                non_logo_insert_counter += 1  # Increment after inserting a non-logo image
             else:
-                translated_doc.add_paragraph(para)
+                print(f"Image not found: {image_path}")
 
-    # Insert images at the end of the document
-    image_files = sorted([
-        f for f in os.listdir(images_output_folder)
-        if os.path.isfile(os.path.join(images_output_folder, f)) and f.lower().endswith(('.png', '.jpg', '.jpeg'))
-    ], key=lambda x: int(os.path.splitext(x)[0]))
+            continue
 
-    for image_filename in image_files:
-        image_path = os.path.join(images_output_folder, image_filename)
-        if os.path.exists(image_path):
-            translated_doc.add_picture(image_path, width=Inches(4))  # Adjust size as needed
-            last_paragraph = translated_doc.paragraphs[-1]
-            last_paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            print(f"Inserted image {image_filename} into the translated document.")
+        # Handle content inside figure (if any)
+        if in_figure:
+            continue  # Skip content inside figure tags if not needed
+
+        # Collect text lines
+        text_buffer.append(line)
+
+    # After processing all lines, check if there's remaining text to translate
+    if text_buffer:
+        text_to_translate = '\n'.join(text_buffer)
+        print(f"original text: {text_to_translate}")
+        translations = translate_text(text_to_translate)
+        print(f"translations: {translations}")
+        
+        # Check if translations are wrapped in TranslationsSchema
+        if hasattr(translations, 'translations'):
+            translation_list = translations.translations
         else:
-            print(f"Image not found: {image_path}")
+            translation_list = translations  # Assuming it's a list
+
+        for translation in translation_list:
+            translated_header = translation.header or ""
+            translated_content = translation.content or ""
+            # Insert translated header if exists
+            if translated_header:
+                translated_doc.add_heading(translated_header, level=1)
+            # Insert translated content
+            if translated_content:
+                translated_doc.add_paragraph(translated_content)
 
     # Save the translated Word document
     translated_doc.save(word_output_path)
