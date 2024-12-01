@@ -14,8 +14,8 @@ from PIL import Image
 
 def main():
     st.set_page_config(page_title="PDF Translator", layout="wide")
-    st.title("PDF Translator and Word Document Generator")
-    st.write("Upload a PDF file to translate its content and download the translated Word document.")
+    st.title("DB Intern Word Document Translator")
+    st.write("Please Upload a PDF file to translate")
 
     # File uploader
     uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
