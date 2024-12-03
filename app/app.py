@@ -45,7 +45,7 @@ def main():
                         ensure_folder_exists(logo_output_folder)
 
                         # Path to the logo image (ensure this path is correct)
-                        logo_image_path = "/Users/AbdullahMS/Desktop/Work/TCS/Int/db_Intern_project/Data/logo/logo.png"  # Update this path as needed
+                        logo_image_path = "C:/Users/2501767/OneDrive - TCS COM PROD/db_Intern_project/Data/logo/logo.png"  # Update this path as needed
 
                         if not os.path.exists(logo_image_path):
                             st.error(f"Logo image not found at {logo_image_path}. Please check the path.")

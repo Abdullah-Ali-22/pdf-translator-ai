@@ -95,7 +95,7 @@ def analyze_layout(
     images_output_folder,
     logo_output_folder,
     logo_image_features,
-    similarity_threshold=0.8,
+    similarity_threshold=0.6,
 ):
     """
     Analyze the layout of a document and extract figures.

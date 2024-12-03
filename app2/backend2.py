@@ -20,7 +20,7 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.models import Model
 
 # Import the translate_text function from translator.py
-from translator import translate_text
+from translator2 import translate_text
 
 # Import the extract_job_details function and JobDetailsSchema from table_generate_agent.py
 from table_generate_agent import extract_job_details, JobDetailsSchema
@@ -95,7 +95,7 @@ def analyze_layout(
     images_output_folder,
     logo_output_folder,
     logo_image_features,
-    similarity_threshold=0.8,
+    similarity_threshold=0.6,
 ):
     """
     Analyze the layout of a document and extract figures.
@@ -408,6 +408,7 @@ def save_figures_to_word_with_position(md_content, images_output_folder, word_ou
 #     # Save the translated Word document
 #     translated_doc.save(word_output_path)
 #     print(f"Translated Word document saved at {word_output_path}")
+
 
 def save_translated_word(md_content, images_output_folder, word_output_path, logo_output_folder, logo_fig_indices, job_details: JobDetailsSchema):
     """

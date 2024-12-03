@@ -33,7 +33,7 @@ llm = AzureChatOpenAI(
     api_version="2024-10-01-preview",
     api_key=AZURE_OPENAI_KEY,
     azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    temperature=0.3,
+    temperature=0.0,
 )
 
 
