@@ -4,6 +4,7 @@ from langchain_core.prompts import PromptTemplate
 from docx import Document
 from pydantic import BaseModel, Field
 from typing import Optional, List, Union, Dict , Type
+from langchain.tools import tool
 
 # Load environment variables
 from dotenv import load_dotenv
@@ -51,6 +52,26 @@ class TranslationsSchema(BaseModel):
     )
 
 
+# Define Schema for Table Output
+class TableTranslationSchema(BaseModel):
+    table: List[Dict[str, str]] = Field(
+        description="A list of dictionaries where each key-value pair represents a row and its translated columns."
+    )
+
+
+# Define a tool to format the translated text into a table
+@tool("format_table", description="Formats translated content into a structured table.")
+def format_table(data: List[TranslationsSchemaItem]) -> List[Dict[str, str]]:
+    """
+    Converts translated paragraphs into a structured table format.
+    """
+    table = []
+    for item in data:
+        table.append({
+            "Header": item.header or "",
+            "Content": item.content or ""
+        })
+    return table
 
 
 
@@ -58,6 +79,7 @@ translate_template = """
 You are a highly skilled translator. Please translate the following text from German to English with precision, ensuring that the translation is complete and retains the original meaning and tone.
 
 Please maintain the original structure by preserving the headers and their corresponding sections. Headers in the text are denoted by one or more '#' symbols (e.g., #, ##, ###, ####, #####).
+- If the text is structured in a table, preserve the tabular format in the translation.
 
 **Original Text:**
 {text}
@@ -80,3 +102,12 @@ def translate_text(text):
     #return tranlated_header, tranlated_content
     return result.translations
 
+"""def translate_text(text, is_table=False):
+    result = chain.invoke({"text": text}).translations
+    
+    if is_table:
+        # Convert result into a table format
+        table_result = format_table.invoke(result)
+        return TableTranslationSchema(table=table_result)
+    
+    return result"""
