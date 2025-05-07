@@ -37,21 +37,41 @@ llm = AzureChatOpenAI(
 )
 
 
-class PDFSummarySchema(BaseModel):
+class JobDescriptionSchema(BaseModel):
     """
-    Schema for extracting a title and summary from a PDF document.
+    Schema for the job description details.
     """
-    title: Optional[str] = Field(default=None, description="The title of the document or main subject")
-    summary: Optional[str] = Field(default=None, description="A concise summary of the document content")
+    must: Optional[List[str]] = Field(default=None, description="List of required skills and experience (Must) in English")
+    target: Optional[List[str]] = Field(default=None, description="List of target skills and experience (Target) in English")
+
+class JobDetailsSchema(BaseModel):
+    """
+    Schema for the job details table.
+    """
+    role_position: Optional[str] = Field(default=None, description="The role or position name in English")
+    location: Optional[str] = Field(default=None, description="Job location in English")
+    number_of_fte: Optional[int] = Field(default=None, description="Number of full-time equivalents required in English")
+    rgs_id: Optional[str] = Field(default=None, description="RGS ID in English")
+    remote_onsite: Optional[str] = Field(default=None, description="Remote or onsite details with specific distribution in English")
+    onsite_frequency_week: Optional[str] = Field(default=None, description="Frequency of onsite work per week in English")
+    project_duration: Optional[str] = Field(default=None, description="Duration of the project in English")
+    working_hours_per_day: Optional[str] = Field(default=None, description="Number of working hours per day in English")
+    contract_mode: Optional[str] = Field(default=None, description="Contract type, e.g., Freelancer or Employee in English")
+    daily_rate: Optional[str] = Field(default=None, description="Daily rate in euros in English")
+    language_proficiency: Optional[str] = Field(default=None, description="Required language proficiency in English")
+    start_date_of_engagement: Optional[str] = Field(default=None, description="Start date of engagement in English")
+    experience_required: Optional[str] = Field(default=None, description="Years and type of experience required in English")
+    job_description: Optional[JobDescriptionSchema] = Field(default=None, description="Job description details including Must and Target fields in English")
 
 
-PDFSummary_filling_prompt = ChatPromptTemplate.from_messages(
+
+JobDetails_filling_prompt = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are an expert in extracting key information from documents. "
-            "Extract the title and provide a concise summary of the document. "
-            "If information is not present, return null for that field.",
+            "You are an expert in extracting job details and answering Questions "
+            "fill the relevant fields from the given schema in English language "
+            "If a answer is not present, return null for the attribute's value.",
         ),
         MessagesPlaceholder("examples"),
         ("human", "{text}"),
@@ -59,7 +79,8 @@ PDFSummary_filling_prompt = ChatPromptTemplate.from_messages(
 )
 
 
-PDFSummary_filling_prompt.invoke(
+
+JobDetails_filling_prompt.invoke(
     {"text": "this is some text", "examples": [HumanMessage(content="testing 1 2 3")]}
 )
 
@@ -117,8 +138,8 @@ def tool_example_to_messages(example: Example) -> List[BaseMessage]:
 
 
 examples = [
-    ('Quality Test Engineer job posting for a junior position. This role involves ensuring product quality through systematic testing and quality assurance processes. The candidate will be responsible for creating test plans, executing tests, and documenting results. They should have basic knowledge of testing methodologies and quality standards. Experience with automated testing tools is a plus. The position requires good attention to detail and analytical skills.',
-      PDFSummarySchema(title="Quality Test Engineer - Junior Position", summary="A junior-level Quality Test Engineer role focused on quality assurance and testing. The position involves creating and executing test plans, documenting results, and requires knowledge of testing methodologies. The ideal candidate will have good attention to detail, analytical skills, and preferably experience with automated testing tools.")),
+    ('We are looking for a Software Engineer based in Berlin. The role is remote with 2 days onsite per week. The project duration is 6 months, with 8 working hours per day. The contract mode is Freelancer with a daily rate of 500 euros. The candidate must be proficient in English and have at least 3 years of experience in software development. Required skills include Python and Django, while React and Node.js are desirable.',
+      JobDetailsSchema(role_position="Software Engineer", location="Berlin", number_of_fte=1, rgs_id="1234", remote_onsite="Remote", onsite_frequency_week="2", project_duration="6 months", working_hours_per_day="8", contract_mode="Freelancer", daily_rate="500", language_proficiency="English", start_date_of_engagement="2023-01-01", experience_required="3 years of experience in software development", job_description=JobDescriptionSchema(must=["Python", "Django"], target=["React", "Node.js"]))),
      ]
 messages = []
 
@@ -128,22 +149,22 @@ for text, tool_call in examples:
     )
 
 
-runnable = PDFSummary_filling_prompt | llm.with_structured_output(
-        schema=PDFSummarySchema,
+runnable = JobDetails_filling_prompt | llm.with_structured_output(
+        schema=JobDetailsSchema,
         method="function_calling",
         include_raw=False,
     )
 
 
-def extract_pdf_summary(text: str) -> PDFSummarySchema:
+def extract_job_details(text: str) -> JobDetailsSchema:
         """
-        Function to extract a title and summary from document text.
+        Function to call the runnable and return the extracted job details.
         
         Args:
-            text (str): The input text from the PDF document.
+            text (str): The input text containing job details.
             
         Returns:
-            PDFSummarySchema: The extracted title and summary.
+            JobDetailsSchema: The extracted job details.
         """
         response = runnable.invoke({"text": text, "examples": messages})
         return response
