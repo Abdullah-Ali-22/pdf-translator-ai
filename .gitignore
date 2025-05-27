@@ -1,6 +1,7 @@
 venv
 .venv
-Data
-.env
-__pycache__
-*.pyc
+.*/.env
+.*/__pycache__
+.*/.*.pyc
+#ignore Data folder completely
+Data/
